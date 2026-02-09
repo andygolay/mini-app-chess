@@ -32,6 +32,8 @@ export function useChessGame(
   const refreshGame = useCallback(async () => {
     if (!sdk || !address) return;
 
+    setError(''); // Clear any previous error on refresh
+
     try {
       // Check if player has a game
       const hasGameResult = await sdk.view({
@@ -175,8 +177,6 @@ export function useChessGame(
         arguments: [],
         title: 'New Chess Game',
         description: 'Start a new game against the AI',
-        useFeePayer: true,
-        gasLimit: 'Sponsored',
       });
 
       console.log('[Chess] New game tx:', result?.hash);
@@ -221,8 +221,7 @@ export function useChessGame(
           ],
           title: 'Chess Move',
           description: `Move ${fromNotation} to ${toNotation}`,
-          useFeePayer: true,
-          gasLimit: 'Sponsored',
+          gasLimit: 2000000,
         });
 
         console.log('[Chess] Move tx:', result?.hash);
@@ -271,8 +270,6 @@ export function useChessGame(
         arguments: [],
         title: 'Resign',
         description: 'Resign the current game',
-        useFeePayer: true,
-        gasLimit: 'Sponsored',
       });
 
       await refreshGame();
@@ -302,8 +299,6 @@ export function useChessGame(
         arguments: [],
         title: 'Claim Draw',
         description: 'Claim a draw by 50-move rule or insufficient material',
-        useFeePayer: true,
-        gasLimit: 'Sponsored',
       });
 
       await refreshGame();

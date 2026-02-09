@@ -531,7 +531,7 @@ module chess::chess {
             return false
         };
 
-        is_diagonal_clear(board, from, to)
+        check_diagonal_path(board, from, to)
     }
 
     fun is_valid_rook_move(board: &vector<u8>, from: u8, to: u8): bool {
@@ -630,47 +630,74 @@ module chess::chess {
         true
     }
 
-    fun is_diagonal_clear(board: &vector<u8>, from: u8, to: u8): bool {
-        let from_row = (from / 8) as u64;
-        let from_col = (from % 8) as u64;
-        let to_row = (to / 8) as u64;
-        let to_col = (to % 8) as u64;
+    // Check if the diagonal path between from and to is clear (exclusive of endpoints)
+    fun check_diagonal_path(board: &vector<u8>, from: u8, to: u8): bool {
+        if (from >= 64 || to >= 64 || from == to) {
+            return true
+        };
 
-        let row_dir: u64 = if (to_row > from_row) { 1 } else { 0 };
-        let row_neg = to_row < from_row;
-        let col_dir: u64 = if (to_col > from_col) { 1 } else { 0 };
-        let col_neg = to_col < from_col;
+        let from_row = from / 8;
+        let from_col = from % 8;
+        let to_row = to / 8;
+        let to_col = to % 8;
 
-        let curr_row = if (row_neg) { from_row - 1 } else { from_row + row_dir };
-        let curr_col = if (col_neg) { from_col - 1 } else { from_col + col_dir };
+        // Determine direction
+        let row_step_positive = to_row > from_row;
+        let col_step_positive = to_col > from_col;
 
-        while (curr_row != to_row || curr_col != to_col) {
+        // Start one step from 'from'
+        let curr_row = if (row_step_positive) { from_row + 1 } else { if (from_row > 0) { from_row - 1 } else { return true } };
+        let curr_col = if (col_step_positive) { from_col + 1 } else { if (from_col > 0) { from_col - 1 } else { return true } };
+
+        // Walk the diagonal until we reach 'to' (exclusive)
+        while (curr_row != to_row && curr_col != to_col) {
+            if (curr_row >= 8 || curr_col >= 8) {
+                return true // Out of bounds, shouldn't happen with valid input
+            };
+
             let sq = curr_row * 8 + curr_col;
-            let piece = *vector::borrow(board, sq);
+            let piece = *vector::borrow(board, (sq as u64));
             if ((piece & 7) != EMPTY) {
                 return false
             };
 
-            if (row_neg) { curr_row = curr_row - 1; } else { curr_row = curr_row + row_dir; };
-            if (col_neg) { curr_col = curr_col - 1; } else { curr_col = curr_col + col_dir; };
+            // Step
+            if (row_step_positive) {
+                curr_row = curr_row + 1;
+            } else {
+                if (curr_row == 0) break;
+                curr_row = curr_row - 1;
+            };
+
+            if (col_step_positive) {
+                curr_col = curr_col + 1;
+            } else {
+                if (curr_col == 0) break;
+                curr_col = curr_col - 1;
+            };
         };
 
         true
     }
 
+    // Check if the straight line path (horizontal or vertical) between from and to is clear
     fun is_line_clear(board: &vector<u8>, from: u8, to: u8): bool {
+        if (from >= 64 || to >= 64 || from == to) {
+            return true
+        };
+
         let from_row = from / 8;
         let from_col = from % 8;
         let to_row = to / 8;
         let to_col = to % 8;
 
         if (from_row == to_row) {
-            // Horizontal
-            let start = if (from_col < to_col) { from_col + 1 } else { to_col + 1 };
-            let end = if (from_col < to_col) { to_col } else { from_col };
+            // Horizontal move - check columns between
+            let min_col = if (from_col < to_col) { from_col } else { to_col };
+            let max_col = if (from_col > to_col) { from_col } else { to_col };
 
-            let col = start;
-            while (col < end) {
+            let col = min_col + 1;
+            while (col < max_col) {
                 let sq = from_row * 8 + col;
                 let piece = *vector::borrow(board, (sq as u64));
                 if ((piece & 7) != EMPTY) {
@@ -678,13 +705,13 @@ module chess::chess {
                 };
                 col = col + 1;
             };
-        } else {
-            // Vertical
-            let start = if (from_row < to_row) { from_row + 1 } else { to_row + 1 };
-            let end = if (from_row < to_row) { to_row } else { from_row };
+        } else if (from_col == to_col) {
+            // Vertical move - check rows between
+            let min_row = if (from_row < to_row) { from_row } else { to_row };
+            let max_row = if (from_row > to_row) { from_row } else { to_row };
 
-            let row = start;
-            while (row < end) {
+            let row = min_row + 1;
+            while (row < max_row) {
                 let sq = row * 8 + from_col;
                 let piece = *vector::borrow(board, (sq as u64));
                 if ((piece & 7) != EMPTY) {
@@ -693,6 +720,7 @@ module chess::chess {
                 row = row + 1;
             };
         };
+        // If neither horizontal nor vertical, just return true (shouldn't be called this way)
 
         true
     }
@@ -885,62 +913,71 @@ module chess::chess {
     }
 
     // ============ AI LOGIC ============
-    // 2-ply minimax with alpha-beta style pruning
-    // Evaluates AI move, then considers best human response
+    // Alpha-beta minimax with quiescence search
+    // Targets ~1500 Elo strength
 
     const SCORE_OFFSET: u64 = 100000; // Offset to handle "negative" scores with u64
+    const MIN_SCORE: u64 = 0;
+    const MAX_SCORE: u64 = 200000;
+    const SEARCH_DEPTH: u8 = 3; // 3-ply search
+    const QUIESCENCE_DEPTH: u8 = 2; // Full quiescence
+
+    // Piece values in centipawns
+    const PAWN_VALUE: u64 = 100;
+    const KNIGHT_VALUE: u64 = 320;
+    const BISHOP_VALUE: u64 = 330;
+    const ROOK_VALUE: u64 = 500;
+    const QUEEN_VALUE: u64 = 900;
+    const KING_VALUE: u64 = 20000;
 
     fun generate_ai_move(game: &Game): Move {
         let best_from: u8 = 0;
         let best_to: u8 = 0;
         let best_promo: u8 = 0;
-        let best_score: u64 = 0;
+        let best_score: u64 = MIN_SCORE;
         let found_move = false;
 
-        // Generate all legal moves for black
-        let from: u8 = 0;
-        while (from < 64) {
-            let piece = *vector::borrow(&game.board, (from as u64));
-            let piece_color = piece & 8;
+        // Generate and sort moves (captures first for better pruning)
+        let moves = generate_sorted_moves(&game.board, game.black_king_pos, game.white_king_pos, false);
+        let num_moves = vector::length(&moves);
+        let i: u64 = 0;
 
-            if ((piece & 7) != EMPTY && piece_color == BLACK) {
-                let to: u8 = 0;
-                while (to < 64) {
-                    let piece_type = piece & 7;
-                    let to_row = to / 8;
+        while (i < num_moves) {
+            let m = vector::borrow(&moves, i);
+            let from = m.from_square;
+            let to = m.to_square;
+            let promo = m.promotion;
 
-                    let promos = if (piece_type == PAWN && to_row == 0) {
-                        vector[QUEEN, ROOK, BISHOP, KNIGHT]
-                    } else {
-                        vector[0u8]
-                    };
+            if (is_valid_move(game, from, to, promo, false)) {
+                // Make move on temp board
+                let (temp_board, new_black_king, new_white_king) = make_temp_move(
+                    &game.board, from, to, promo, game.black_king_pos, game.white_king_pos
+                );
 
-                    let p = 0;
-                    while (p < vector::length(&promos)) {
-                        let promo = *vector::borrow(&promos, p);
+                // Search with alpha-beta
+                let score = alpha_beta(
+                    &temp_board,
+                    SEARCH_DEPTH - 1,
+                    MIN_SCORE,
+                    MAX_SCORE,
+                    true, // White's turn next (minimizing for black's perspective)
+                    new_black_king,
+                    new_white_king
+                );
 
-                        if (is_valid_move(game, from, to, promo, false)) {
-                            // Evaluate this move using minimax
-                            let score = evaluate_ai_move_with_response(game, from, to, promo);
+                // Add small tiebreaker for variety
+                let tiebreaker = ((from as u64) * 7 + (to as u64) * 3 + game.move_count) % 5;
+                score = score + tiebreaker;
 
-                            // Small deterministic tiebreaker (much smaller than before)
-                            let tiebreaker = ((from as u64) + (to as u64) * 3 + game.move_count) % 10;
-                            let adjusted_score = score + tiebreaker;
-
-                            if (!found_move || adjusted_score > best_score) {
-                                best_score = adjusted_score;
-                                best_from = from;
-                                best_to = to;
-                                best_promo = promo;
-                                found_move = true;
-                            };
-                        };
-                        p = p + 1;
-                    };
-                    to = to + 1;
+                if (!found_move || score > best_score) {
+                    best_score = score;
+                    best_from = from;
+                    best_to = to;
+                    best_promo = promo;
+                    found_move = true;
                 };
             };
-            from = from + 1;
+            i = i + 1;
         };
 
         assert!(found_move, E_NO_LEGAL_MOVES);
@@ -955,22 +992,680 @@ module chess::chess {
         }
     }
 
-    // Evaluate AI move considering best human response (2-ply minimax)
-    fun evaluate_ai_move_with_response(game: &Game, from: u8, to: u8, promo: u8): u64 {
-        // Make the AI move on a temp board
-        let temp_board = game.board;
+    // Alpha-beta minimax search with Late Move Reductions (LMR)
+    // Returns score from BLACK's perspective (higher = better for black)
+    fun alpha_beta(
+        board: &vector<u8>,
+        depth: u8,
+        alpha: u64,
+        beta: u64,
+        is_white_turn: bool,
+        black_king: u8,
+        white_king: u8
+    ): u64 {
+        // Base case: evaluate position
+        if (depth == 0) {
+            return quiescence_search(board, QUIESCENCE_DEPTH, alpha, beta, is_white_turn, black_king, white_king)
+        };
+
+        let mut_alpha = alpha;
+        let mut_beta = beta;
+
+        if (is_white_turn) {
+            // White is minimizing (from black's perspective)
+            let min_score = MAX_SCORE;
+            let moves = generate_sorted_moves(board, black_king, white_king, true);
+            let num_moves = vector::length(&moves);
+
+            if (num_moves == 0) {
+                // No moves - checkmate or stalemate
+                if (is_square_attacked(board, white_king, false)) {
+                    return MAX_SCORE - 1000 // Black wins (good for black)
+                } else {
+                    return SCORE_OFFSET // Stalemate
+                }
+            };
+
+            let moves_searched: u64 = 0;
+            let i: u64 = 0;
+            while (i < num_moves) {
+                let m = vector::borrow(&moves, i);
+                let (temp_board, new_black_king, new_white_king) = make_temp_move(
+                    board, m.from_square, m.to_square, m.promotion, black_king, white_king
+                );
+
+                // Skip if move leaves white in check
+                if (!is_square_attacked(&temp_board, new_white_king, false)) {
+                    let is_capture = m.captured_piece != EMPTY;
+                    let search_depth = depth - 1;
+
+                    // Late Move Reduction: reduce depth for late non-captures
+                    // First 3 moves and captures get full depth
+                    if (moves_searched >= 3 && !is_capture && depth >= 2) {
+                        search_depth = depth - 2; // Reduce by 1 extra ply
+                    };
+
+                    let score = alpha_beta(&temp_board, search_depth, mut_alpha, mut_beta, false, new_black_king, new_white_king);
+
+                    // Re-search with full depth if reduced search was interesting
+                    if (search_depth < depth - 1 && score < mut_beta) {
+                        score = alpha_beta(&temp_board, depth - 1, mut_alpha, mut_beta, false, new_black_king, new_white_king);
+                    };
+
+                    if (score < min_score) {
+                        min_score = score;
+                    };
+
+                    if (score < mut_beta) {
+                        mut_beta = score;
+                    };
+
+                    // Alpha cutoff
+                    if (mut_beta <= mut_alpha) {
+                        return min_score
+                    };
+
+                    moves_searched = moves_searched + 1;
+                };
+                i = i + 1;
+            };
+            min_score
+        } else {
+            // Black is maximizing
+            let max_score = MIN_SCORE;
+            let moves = generate_sorted_moves(board, black_king, white_king, false);
+            let num_moves = vector::length(&moves);
+
+            if (num_moves == 0) {
+                // No moves - checkmate or stalemate
+                if (is_square_attacked(board, black_king, true)) {
+                    return MIN_SCORE + 1000 // White wins (bad for black)
+                } else {
+                    return SCORE_OFFSET // Stalemate
+                }
+            };
+
+            let moves_searched: u64 = 0;
+            let i: u64 = 0;
+            while (i < num_moves) {
+                let m = vector::borrow(&moves, i);
+                let (temp_board, new_black_king, new_white_king) = make_temp_move(
+                    board, m.from_square, m.to_square, m.promotion, black_king, white_king
+                );
+
+                // Skip if move leaves black in check
+                if (!is_square_attacked(&temp_board, new_black_king, true)) {
+                    let is_capture = m.captured_piece != EMPTY;
+                    let search_depth = depth - 1;
+
+                    // Late Move Reduction: reduce depth for late non-captures
+                    if (moves_searched >= 3 && !is_capture && depth >= 2) {
+                        search_depth = depth - 2;
+                    };
+
+                    let score = alpha_beta(&temp_board, search_depth, mut_alpha, mut_beta, true, new_black_king, new_white_king);
+
+                    // Re-search with full depth if reduced search showed promise
+                    if (search_depth < depth - 1 && score > mut_alpha) {
+                        score = alpha_beta(&temp_board, depth - 1, mut_alpha, mut_beta, true, new_black_king, new_white_king);
+                    };
+
+                    if (score > max_score) {
+                        max_score = score;
+                    };
+
+                    if (score > mut_alpha) {
+                        mut_alpha = score;
+                    };
+
+                    // Beta cutoff
+                    if (mut_beta <= mut_alpha) {
+                        return max_score
+                    };
+
+                    moves_searched = moves_searched + 1;
+                };
+                i = i + 1;
+            };
+            max_score
+        }
+    }
+
+    // Quiescence search - only search captures to reach quiet positions
+    fun quiescence_search(
+        board: &vector<u8>,
+        depth: u8,
+        alpha: u64,
+        beta: u64,
+        is_white_turn: bool,
+        black_king: u8,
+        white_king: u8
+    ): u64 {
+        // Static evaluation
+        let stand_pat = evaluate_position_advanced(board, black_king, white_king);
+
+        if (depth == 0) {
+            return stand_pat
+        };
+
+        let mut_alpha = alpha;
+        let mut_beta = beta;
+
+        if (is_white_turn) {
+            // White minimizing
+            if (stand_pat < mut_beta) {
+                mut_beta = stand_pat;
+            };
+            if (mut_beta <= mut_alpha) {
+                return stand_pat
+            };
+
+            // Only search captures
+            let captures = generate_captures(board, true);
+            let num_captures = vector::length(&captures);
+            let i: u64 = 0;
+
+            while (i < num_captures) {
+                let m = vector::borrow(&captures, i);
+                let (temp_board, new_black_king, new_white_king) = make_temp_move(
+                    board, m.from_square, m.to_square, m.promotion, black_king, white_king
+                );
+
+                if (!is_square_attacked(&temp_board, new_white_king, false)) {
+                    let score = quiescence_search(&temp_board, depth - 1, mut_alpha, mut_beta, false, new_black_king, new_white_king);
+                    if (score < mut_beta) {
+                        mut_beta = score;
+                    };
+                    if (mut_beta <= mut_alpha) {
+                        return mut_beta
+                    };
+                };
+                i = i + 1;
+            };
+            mut_beta
+        } else {
+            // Black maximizing
+            if (stand_pat > mut_alpha) {
+                mut_alpha = stand_pat;
+            };
+            if (mut_beta <= mut_alpha) {
+                return stand_pat
+            };
+
+            let captures = generate_captures(board, false);
+            let num_captures = vector::length(&captures);
+            let i: u64 = 0;
+
+            while (i < num_captures) {
+                let m = vector::borrow(&captures, i);
+                let (temp_board, new_black_king, new_white_king) = make_temp_move(
+                    board, m.from_square, m.to_square, m.promotion, black_king, white_king
+                );
+
+                if (!is_square_attacked(&temp_board, new_black_king, true)) {
+                    let score = quiescence_search(&temp_board, depth - 1, mut_alpha, mut_beta, true, new_black_king, new_white_king);
+                    if (score > mut_alpha) {
+                        mut_alpha = score;
+                    };
+                    if (mut_beta <= mut_alpha) {
+                        return mut_alpha
+                    };
+                };
+                i = i + 1;
+            };
+            mut_alpha
+        }
+    }
+
+    // Generate moves - piece-centric for efficiency (no 64x64 loops)
+    fun generate_sorted_moves(board: &vector<u8>, black_king: u8, white_king: u8, is_white: bool): vector<Move> {
+        let captures = vector::empty<Move>();
+        let capture_scores = vector::empty<u64>();
+        let non_captures = vector::empty<Move>();
+        let color = if (is_white) { WHITE } else { BLACK };
+
+        let from: u8 = 0;
+        while (from < 64) {
+            let piece = *vector::borrow(board, (from as u64));
+            let piece_type = piece & 7;
+            let piece_color = piece & 8;
+
+            if (piece_type != EMPTY && piece_color == color) {
+                // Generate moves based on piece type (piece-centric, not square-centric)
+                generate_piece_moves(board, from, piece_type, is_white, color, &mut captures, &mut capture_scores, &mut non_captures);
+            };
+            from = from + 1;
+        };
+
+        // Simple insertion of high-value captures first (avoid full sort)
+        // Just put queen captures at front
+        let result = vector::empty<Move>();
+        let i: u64 = 0;
+        let num_captures = vector::length(&captures);
+
+        // First pass: queen/rook captures (high value)
+        while (i < num_captures) {
+            let score = *vector::borrow(&capture_scores, i);
+            if (score >= 5000) { // Queen or rook capture
+                vector::push_back(&mut result, *vector::borrow(&captures, i));
+            };
+            i = i + 1;
+        };
+        // Second pass: other captures
+        i = 0;
+        while (i < num_captures) {
+            let score = *vector::borrow(&capture_scores, i);
+            if (score < 5000) {
+                vector::push_back(&mut result, *vector::borrow(&captures, i));
+            };
+            i = i + 1;
+        };
+
+        // Add castling moves
+        if (is_white) {
+            if (can_castle_kingside_simple(board, white_king, true)) {
+                vector::push_back(&mut result, Move {
+                    from_square: white_king, to_square: white_king + 2, promotion: 0,
+                    captured_piece: 0, is_castling: true, is_en_passant: false
+                });
+            };
+            if (can_castle_queenside_simple(board, white_king, true)) {
+                vector::push_back(&mut result, Move {
+                    from_square: white_king, to_square: white_king - 2, promotion: 0,
+                    captured_piece: 0, is_castling: true, is_en_passant: false
+                });
+            };
+        } else {
+            if (can_castle_kingside_simple(board, black_king, false)) {
+                vector::push_back(&mut result, Move {
+                    from_square: black_king, to_square: black_king + 2, promotion: 0,
+                    captured_piece: 0, is_castling: true, is_en_passant: false
+                });
+            };
+            if (can_castle_queenside_simple(board, black_king, false)) {
+                vector::push_back(&mut result, Move {
+                    from_square: black_king, to_square: black_king - 2, promotion: 0,
+                    captured_piece: 0, is_castling: true, is_en_passant: false
+                });
+            };
+        };
+
+        // Add non-captures
+        i = 0;
+        while (i < vector::length(&non_captures)) {
+            vector::push_back(&mut result, *vector::borrow(&non_captures, i));
+            i = i + 1;
+        };
+        result
+    }
+
+    // Generate moves for a specific piece (piece-centric approach)
+    fun generate_piece_moves(
+        board: &vector<u8>,
+        from: u8,
+        piece_type: u8,
+        is_white: bool,
+        color: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>
+    ) {
+        let from_row = from / 8;
+        let from_col = from % 8;
+
+        if (piece_type == PAWN) {
+            generate_pawn_moves(board, from, from_row, from_col, is_white, color, captures, capture_scores, non_captures);
+        } else if (piece_type == KNIGHT) {
+            generate_knight_moves(board, from, from_row, from_col, color, captures, capture_scores, non_captures);
+        } else if (piece_type == BISHOP) {
+            generate_sliding_moves(board, from, color, captures, capture_scores, non_captures, true, false);
+        } else if (piece_type == ROOK) {
+            generate_sliding_moves(board, from, color, captures, capture_scores, non_captures, false, true);
+        } else if (piece_type == QUEEN) {
+            generate_sliding_moves(board, from, color, captures, capture_scores, non_captures, true, true);
+        } else if (piece_type == KING) {
+            generate_king_moves(board, from, from_row, from_col, color, captures, capture_scores, non_captures);
+        };
+    }
+
+    fun generate_pawn_moves(
+        board: &vector<u8>,
+        from: u8,
+        from_row: u8,
+        from_col: u8,
+        is_white: bool,
+        color: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>
+    ) {
+        let promo_row = if (is_white) { 7u8 } else { 0u8 };
+        let _dir: u8 = if (is_white) { 8 } else { 0 }; // Direction offset (unused)
+        let start_row = if (is_white) { 1u8 } else { 6u8 };
+
+        // Forward move
+        let to = if (is_white) { from + 8 } else { if (from >= 8) { from - 8 } else { 64 } };
+        if (to < 64) {
+            let target = *vector::borrow(board, (to as u64));
+            if ((target & 7) == EMPTY) {
+                add_pawn_move(from, to, to / 8, promo_row, captures, capture_scores, non_captures, 0);
+
+                // Double push from start
+                if (from_row == start_row) {
+                    let to2 = if (is_white) { from + 16 } else { if (from >= 16) { from - 16 } else { 64 } };
+                    if (to2 < 64) {
+                        let target2 = *vector::borrow(board, (to2 as u64));
+                        if ((target2 & 7) == EMPTY) {
+                            vector::push_back(non_captures, Move {
+                                from_square: from, to_square: to2, promotion: 0,
+                                captured_piece: 0, is_castling: false, is_en_passant: false
+                            });
+                        };
+                    };
+                };
+            };
+        };
+
+        // Captures (diagonal)
+        let cap_targets = vector::empty<u8>();
+        if (is_white) {
+            if (from_col > 0 && from + 7 < 64) { vector::push_back(&mut cap_targets, from + 7); };
+            if (from_col < 7 && from + 9 < 64) { vector::push_back(&mut cap_targets, from + 9); };
+        } else {
+            if (from_col > 0 && from >= 9) { vector::push_back(&mut cap_targets, from - 9); };
+            if (from_col < 7 && from >= 7) { vector::push_back(&mut cap_targets, from - 7); };
+        };
+
+        let i = 0;
+        while (i < vector::length(&cap_targets)) {
+            let to = *vector::borrow(&cap_targets, i);
+            let target = *vector::borrow(board, (to as u64));
+            let target_type = target & 7;
+            let target_color = target & 8;
+
+            if (target_type != EMPTY && target_color != color) {
+                add_pawn_move(from, to, to / 8, promo_row, captures, capture_scores, non_captures, target_type);
+            };
+            i = i + 1;
+        };
+    }
+
+    fun add_pawn_move(
+        from: u8, to: u8, to_row: u8, promo_row: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>,
+        captured: u8
+    ) {
+        if (to_row == promo_row) {
+            // Promotion - only queen for simplicity in AI (main line)
+            let m = Move {
+                from_square: from, to_square: to, promotion: QUEEN,
+                captured_piece: captured, is_castling: false, is_en_passant: false
+            };
+            if (captured != EMPTY) {
+                let score = get_piece_value(captured) * 10 + 900; // Pawn promoting
+                vector::push_back(captures, m);
+                vector::push_back(capture_scores, score);
+            } else {
+                vector::push_back(non_captures, m);
+            };
+        } else {
+            let m = Move {
+                from_square: from, to_square: to, promotion: 0,
+                captured_piece: captured, is_castling: false, is_en_passant: false
+            };
+            if (captured != EMPTY) {
+                let score = get_piece_value(captured) * 10 + (1000 - PAWN_VALUE);
+                vector::push_back(captures, m);
+                vector::push_back(capture_scores, score);
+            } else {
+                vector::push_back(non_captures, m);
+            };
+        };
+    }
+
+    fun generate_knight_moves(
+        board: &vector<u8>,
+        from: u8,
+        from_row: u8,
+        from_col: u8,
+        color: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>
+    ) {
+        // Knight moves: 8 possible L-shapes - check each explicitly
+        try_knight_move(board, from, from_row, from_col, 2, 1, true, true, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 2, 1, true, false, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 2, 1, false, true, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 2, 1, false, false, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 1, 2, true, true, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 1, 2, true, false, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 1, 2, false, true, color, captures, capture_scores, non_captures);
+        try_knight_move(board, from, from_row, from_col, 1, 2, false, false, color, captures, capture_scores, non_captures);
+    }
+
+    fun try_knight_move(
+        board: &vector<u8>,
+        from: u8,
+        from_row: u8,
+        from_col: u8,
+        dr: u8,
+        dc: u8,
+        row_pos: bool,
+        col_pos: bool,
+        color: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>
+    ) {
+        let to_row = if (row_pos) {
+            from_row + dr
+        } else {
+            if (from_row >= dr) { from_row - dr } else { return }
+        };
+        let to_col = if (col_pos) {
+            from_col + dc
+        } else {
+            if (from_col >= dc) { from_col - dc } else { return }
+        };
+
+        if (to_row >= 8 || to_col >= 8) { return };
+
+        let to = to_row * 8 + to_col;
+        let target = *vector::borrow(board, (to as u64));
+        let target_type = target & 7;
+        let target_color = target & 8;
+
+        if (target_type == EMPTY) {
+            vector::push_back(non_captures, Move {
+                from_square: from, to_square: to, promotion: 0,
+                captured_piece: 0, is_castling: false, is_en_passant: false
+            });
+        } else if (target_color != color) {
+            let score = get_piece_value(target_type) * 10 + (1000 - KNIGHT_VALUE);
+            vector::push_back(captures, Move {
+                from_square: from, to_square: to, promotion: 0,
+                captured_piece: target_type, is_castling: false, is_en_passant: false
+            });
+            vector::push_back(capture_scores, score);
+        };
+    }
+
+    fun generate_sliding_moves(
+        board: &vector<u8>,
+        from: u8,
+        color: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>,
+        diagonal: bool,
+        orthogonal: bool
+    ) {
+        let from_row = (from / 8) as u64;
+        let from_col = (from % 8) as u64;
+        let piece_val = if (diagonal && orthogonal) { QUEEN_VALUE }
+                       else if (diagonal) { BISHOP_VALUE }
+                       else { ROOK_VALUE };
+
+        // Directions: 0=stay, 1=increase, 2=decrease
+        if (diagonal) {
+            slide_in_direction(board, from, from_row, from_col, 1, 1, color, piece_val, captures, capture_scores, non_captures); // +row +col
+            slide_in_direction(board, from, from_row, from_col, 1, 2, color, piece_val, captures, capture_scores, non_captures); // +row -col
+            slide_in_direction(board, from, from_row, from_col, 2, 1, color, piece_val, captures, capture_scores, non_captures); // -row +col
+            slide_in_direction(board, from, from_row, from_col, 2, 2, color, piece_val, captures, capture_scores, non_captures); // -row -col
+        };
+        if (orthogonal) {
+            slide_in_direction(board, from, from_row, from_col, 1, 0, color, piece_val, captures, capture_scores, non_captures); // +row
+            slide_in_direction(board, from, from_row, from_col, 2, 0, color, piece_val, captures, capture_scores, non_captures); // -row
+            slide_in_direction(board, from, from_row, from_col, 0, 1, color, piece_val, captures, capture_scores, non_captures); // +col
+            slide_in_direction(board, from, from_row, from_col, 0, 2, color, piece_val, captures, capture_scores, non_captures); // -col
+        };
+    }
+
+    // dr/dc: 0=no change, 1=increase, 2=decrease
+    fun slide_in_direction(
+        board: &vector<u8>,
+        from: u8,
+        from_row: u64,
+        from_col: u64,
+        dr: u8,
+        dc: u8,
+        color: u8,
+        piece_val: u64,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>
+    ) {
+        let r = from_row;
+        let c = from_col;
+
+        loop {
+            // Move one step: 0=stay, 1=increase, 2=decrease
+            if (dr == 1) { r = r + 1; } else if (dr == 2) { if (r == 0) { break }; r = r - 1; };
+            if (dc == 1) { c = c + 1; } else if (dc == 2) { if (c == 0) { break }; c = c - 1; };
+
+            if (r >= 8 || c >= 8) { break };
+
+            let to = ((r * 8 + c) as u8);
+            let target = *vector::borrow(board, (to as u64));
+            let target_type = target & 7;
+            let target_color = target & 8;
+
+            if (target_type == EMPTY) {
+                vector::push_back(non_captures, Move {
+                    from_square: from, to_square: to, promotion: 0,
+                    captured_piece: 0, is_castling: false, is_en_passant: false
+                });
+            } else {
+                if (target_color != color) {
+                    let score = get_piece_value(target_type) * 10 + (1000 - piece_val);
+                    vector::push_back(captures, Move {
+                        from_square: from, to_square: to, promotion: 0,
+                        captured_piece: target_type, is_castling: false, is_en_passant: false
+                    });
+                    vector::push_back(capture_scores, score);
+                };
+                break // Blocked
+            };
+        };
+    }
+
+    fun generate_king_moves(
+        board: &vector<u8>,
+        from: u8,
+        from_row: u8,
+        from_col: u8,
+        color: u8,
+        captures: &mut vector<Move>,
+        capture_scores: &mut vector<u64>,
+        non_captures: &mut vector<Move>
+    ) {
+        // 8 adjacent squares
+        let dr: u8 = 0;
+        while (dr < 3) {
+            let dc: u8 = 0;
+            while (dc < 3) {
+                if (dr != 1 || dc != 1) { // Skip center (the king's current position)
+                    let to_row = if (dr == 0) { if (from_row > 0) { from_row - 1 } else { 255 } }
+                                else if (dr == 2) { from_row + 1 }
+                                else { from_row };
+                    let to_col = if (dc == 0) { if (from_col > 0) { from_col - 1 } else { 255 } }
+                                else if (dc == 2) { from_col + 1 }
+                                else { from_col };
+
+                    if (to_row < 8 && to_col < 8) {
+                        let to = to_row * 8 + to_col;
+                        let target = *vector::borrow(board, (to as u64));
+                        let target_type = target & 7;
+                        let target_color = target & 8;
+
+                        if (target_type == EMPTY) {
+                            vector::push_back(non_captures, Move {
+                                from_square: from, to_square: to, promotion: 0,
+                                captured_piece: 0, is_castling: false, is_en_passant: false
+                            });
+                        } else if (target_color != color) {
+                            let score = get_piece_value(target_type) * 10 + (1000 - KING_VALUE);
+                            vector::push_back(captures, Move {
+                                from_square: from, to_square: to, promotion: 0,
+                                captured_piece: target_type, is_castling: false, is_en_passant: false
+                            });
+                            vector::push_back(capture_scores, score);
+                        };
+                    };
+                };
+                dc = dc + 1;
+            };
+            dr = dr + 1;
+        };
+    }
+
+    // Generate only capture moves for quiescence search (piece-centric)
+    fun generate_captures(board: &vector<u8>, is_white: bool): vector<Move> {
+        let captures = vector::empty<Move>();
+        let capture_scores = vector::empty<u64>();
+        let non_captures = vector::empty<Move>(); // Dummy, won't be used
+        let color = if (is_white) { WHITE } else { BLACK };
+
+        let from: u8 = 0;
+        while (from < 64) {
+            let piece = *vector::borrow(board, (from as u64));
+            let piece_type = piece & 7;
+            let piece_color = piece & 8;
+
+            if (piece_type != EMPTY && piece_color == color) {
+                generate_piece_moves(board, from, piece_type, is_white, color, &mut captures, &mut capture_scores, &mut non_captures);
+            };
+            from = from + 1;
+        };
+
+        // Return only captures (non_captures is discarded)
+        captures
+    }
+
+    // Make a move on a temporary board
+    fun make_temp_move(
+        board: &vector<u8>,
+        from: u8,
+        to: u8,
+        promo: u8,
+        black_king: u8,
+        white_king: u8
+    ): (vector<u8>, u8, u8) {
+        let temp_board = *board;
         let piece = *vector::borrow(&temp_board, (from as u64));
         let piece_type = piece & 7;
-        let captured = *vector::borrow(&temp_board, (to as u64)) & 7;
+        let piece_color = piece & 8;
 
         // Execute move
-        let new_piece = if (promo != 0) { BLACK | promo | HAS_MOVED } else { piece | HAS_MOVED };
+        let new_piece = if (promo != 0) { piece_color | promo | HAS_MOVED } else { piece | HAS_MOVED };
         *vector::borrow_mut(&mut temp_board, (from as u64)) = EMPTY;
         *vector::borrow_mut(&mut temp_board, (to as u64)) = new_piece;
 
         // Handle castling
-        let is_castling = piece_type == KING && abs_diff(from % 8, to % 8) == 2;
-        if (is_castling) {
+        if (piece_type == KING && abs_diff(from % 8, to % 8) == 2) {
             let row = from / 8;
             if (to > from) {
                 let rook = *vector::borrow(&temp_board, ((row * 8 + 7) as u64));
@@ -984,135 +1679,177 @@ module chess::chess {
         };
 
         // Handle en passant
-        let is_en_passant = piece_type == PAWN && (to % 8) != (from % 8) && captured == EMPTY;
-        if (is_en_passant) {
-            *vector::borrow_mut(&mut temp_board, ((to + 8) as u64)) = EMPTY;
-        };
-
-        // Update king position
-        let new_black_king = if (piece_type == KING) { to } else { game.black_king_pos };
-
-        // Immediate position evaluation after AI move
-        let position_score = evaluate_position(&temp_board, new_black_king, game.white_king_pos);
-
-        // BIG bonus for captures (MVV-LVA: Most Valuable Victim - Least Valuable Attacker)
-        let capture_bonus: u64 = 0;
-        if (captured != EMPTY) {
-            // High bonus for captures, extra if attacking with lower value piece
-            capture_bonus = get_piece_value(captured) * 10;
-            let attacker_value = get_piece_value(piece_type);
-            if (attacker_value < get_piece_value(captured)) {
-                capture_bonus = capture_bonus + 500; // Good trade
-            };
-        };
-
-        // Check bonus
-        let gives_check = is_square_attacked(&temp_board, game.white_king_pos, false);
-        let check_bonus: u64 = if (gives_check) { 300 } else { 0 };
-
-        // CRITICAL: Check if the moved piece is safe (not hanging)
-        let piece_safe_bonus: u64 = 0;
-        let piece_is_attacked = is_square_attacked(&temp_board, to, true);
-        let piece_is_defended = is_square_attacked(&temp_board, to, false);
-
-        if (piece_is_attacked) {
-            if (!piece_is_defended) {
-                // Piece is hanging! Big penalty
-                let hanging_penalty = get_piece_value(if (promo != 0) { promo } else { piece_type }) * 8;
-                if (position_score > hanging_penalty) {
-                    return position_score - hanging_penalty + capture_bonus + check_bonus
-                } else {
-                    return capture_bonus + check_bonus // Avoid underflow
-                }
+        let captured = *vector::borrow(board, (to as u64)) & 7;
+        if (piece_type == PAWN && (to % 8) != (from % 8) && captured == EMPTY) {
+            if (piece_color == WHITE) {
+                *vector::borrow_mut(&mut temp_board, ((to - 8) as u64)) = EMPTY;
             } else {
-                // Piece is attacked but defended - check if trade is good
-                let my_value = get_piece_value(if (promo != 0) { promo } else { piece_type });
-                let attacker_value = get_lowest_attacker_value(&temp_board, to, true);
-                if (attacker_value < my_value) {
-                    // Bad trade possible - penalty
-                    let trade_penalty = (my_value - attacker_value) * 5;
-                    if (position_score > trade_penalty) {
-                        return position_score - trade_penalty + capture_bonus + check_bonus
-                    };
-                };
+                *vector::borrow_mut(&mut temp_board, ((to + 8) as u64)) = EMPTY;
             };
-        } else {
-            piece_safe_bonus = 100; // Bonus for safe square
         };
 
-        // Consider best human response (1-ply lookahead for opponent)
-        let human_threat = evaluate_best_human_response(&temp_board, game.white_king_pos, new_black_king);
+        // Update king positions
+        let new_black_king = if (piece_type == KING && piece_color == BLACK) { to } else { black_king };
+        let new_white_king = if (piece_type == KING && piece_color == WHITE) { to } else { white_king };
 
-        // Final score: position + bonuses - opponent's best response threat
-        let base = position_score + capture_bonus + check_bonus + piece_safe_bonus;
-        if (base > human_threat) {
-            base - human_threat
-        } else {
-            1 // Avoid zero/underflow, this is a bad move
-        }
+        (temp_board, new_black_king, new_white_king)
     }
 
-    // Find the best response white can make and return its threat value
-    fun evaluate_best_human_response(board: &vector<u8>, _white_king: u8, black_king: u8): u64 {
-        let max_threat: u64 = 0;
+    // Simplified castling check for move generation
+    fun can_castle_kingside_simple(board: &vector<u8>, king_pos: u8, is_white: bool): bool {
+        let row = if (is_white) { 0u8 } else { 7u8 };
+        if (king_pos != row * 8 + 4) return false;
 
-        let from: u8 = 0;
-        while (from < 64) {
-            let piece = *vector::borrow(board, (from as u64));
+        let king = *vector::borrow(board, (king_pos as u64));
+        if ((king & HAS_MOVED) != 0) return false;
+
+        let rook_pos = row * 8 + 7;
+        let rook = *vector::borrow(board, (rook_pos as u64));
+        if ((rook & 7) != ROOK || (rook & HAS_MOVED) != 0) return false;
+
+        // Check squares between are empty
+        if (*vector::borrow(board, ((row * 8 + 5) as u64)) != EMPTY) return false;
+        if (*vector::borrow(board, ((row * 8 + 6) as u64)) != EMPTY) return false;
+
+        true
+    }
+
+    fun can_castle_queenside_simple(board: &vector<u8>, king_pos: u8, is_white: bool): bool {
+        let row = if (is_white) { 0u8 } else { 7u8 };
+        if (king_pos != row * 8 + 4) return false;
+
+        let king = *vector::borrow(board, (king_pos as u64));
+        if ((king & HAS_MOVED) != 0) return false;
+
+        let rook_pos = row * 8;
+        let rook = *vector::borrow(board, (rook_pos as u64));
+        if ((rook & 7) != ROOK || (rook & HAS_MOVED) != 0) return false;
+
+        // Check squares between are empty
+        if (*vector::borrow(board, ((row * 8 + 1) as u64)) != EMPTY) return false;
+        if (*vector::borrow(board, ((row * 8 + 2) as u64)) != EMPTY) return false;
+        if (*vector::borrow(board, ((row * 8 + 3) as u64)) != EMPTY) return false;
+
+        true
+    }
+
+    // Advanced position evaluation - optimized for VM limits
+    fun evaluate_position_advanced(board: &vector<u8>, black_king: u8, white_king: u8): u64 {
+        let score: u64 = SCORE_OFFSET;
+
+        // Material count + piece-square tables
+        let i: u64 = 0;
+        while (i < 64) {
+            let piece = *vector::borrow(board, i);
             let piece_type = piece & 7;
             let piece_color = piece & 8;
 
-            if (piece_type != EMPTY && piece_color == WHITE) {
-                let to: u8 = 0;
-                while (to < 64) {
-                    // Quick validation (no full game state, simplified)
-                    if (can_piece_reach(board, from, to, piece_type, true)) {
-                        let target = *vector::borrow(board, (to as u64));
-                        let target_type = target & 7;
-                        let target_color = target & 8;
+            if (piece_type != EMPTY) {
+                let value = get_piece_value_advanced(piece_type);
+                let row = (i / 8) as u8;
+                let col = (i % 8) as u8;
 
-                        // Skip if capturing own piece
-                        if (target_type != EMPTY && target_color == WHITE) {
-                            to = to + 1;
-                            continue
-                        };
+                // Piece-square table bonus
+                let psq_bonus = get_piece_square_value(piece_type, row, col, piece_color == WHITE);
 
-                        // Evaluate threat of this response
-                        let threat: u64 = 0;
-
-                        // Capture threat
-                        if (target_type != EMPTY && target_color == BLACK) {
-                            threat = threat + get_piece_value(target_type) * 8;
-
-                            // Check if our piece is defended
-                            if (!is_square_attacked(board, to, false)) {
-                                threat = threat + get_piece_value(target_type) * 4; // Extra for undefended
-                            };
-                        };
-
-                        // Check threat
-                        if (target_type == EMPTY || target_color == BLACK) {
-                            // Simulate human move
-                            let temp = *board;
-                            *vector::borrow_mut(&mut temp, (from as u64)) = EMPTY;
-                            *vector::borrow_mut(&mut temp, (to as u64)) = piece;
-
-                            if (is_square_attacked(&temp, black_king, true)) {
-                                threat = threat + 200; // Check is dangerous
-                            };
-                        };
-
-                        if (threat > max_threat) {
-                            max_threat = threat;
-                        };
+                if (piece_color == BLACK) {
+                    score = score + value + psq_bonus;
+                } else {
+                    if (score > value + psq_bonus) {
+                        score = score - value - psq_bonus;
                     };
-                    to = to + 1;
                 };
             };
-            from = from + 1;
+            i = i + 1;
         };
 
-        max_threat
+        // King safety (lightweight check)
+        let black_safety = evaluate_king_safety_advanced(board, black_king, false);
+        let white_safety = evaluate_king_safety_advanced(board, white_king, true);
+        score = score + black_safety;
+        if (score > white_safety) {
+            score = score - white_safety;
+        };
+
+        // Removed expensive mobility counting - rely on move ordering instead
+
+        score
+    }
+
+    fun get_piece_value_advanced(piece_type: u8): u64 {
+        if (piece_type == PAWN) { PAWN_VALUE }
+        else if (piece_type == KNIGHT) { KNIGHT_VALUE }
+        else if (piece_type == BISHOP) { BISHOP_VALUE }
+        else if (piece_type == ROOK) { ROOK_VALUE }
+        else if (piece_type == QUEEN) { QUEEN_VALUE }
+        else if (piece_type == KING) { KING_VALUE }
+        else { 0 }
+    }
+
+    // Piece-square tables (simplified but effective)
+    fun get_piece_square_value(piece_type: u8, row: u8, col: u8, is_white: bool): u64 {
+        let r = if (is_white) { row } else { 7 - row };
+
+        if (piece_type == PAWN) {
+            // Pawns want to advance, center pawns more valuable
+            let advance = (r as u64) * 10;
+            let center = if (col >= 2 && col <= 5) { 10u64 } else { 0u64 };
+            let double_center = if ((col == 3 || col == 4) && r >= 3) { 15u64 } else { 0u64 };
+            return advance + center + double_center
+        } else if (piece_type == KNIGHT) {
+            // Knights love the center, hate corners
+            let center_bonus = if (col >= 2 && col <= 5 && r >= 2 && r <= 5) { 30u64 } else { 0u64 };
+            let corner_penalty = if ((col == 0 || col == 7) && (r == 0 || r == 7)) { 0u64 } else { 10u64 };
+            return center_bonus + corner_penalty
+        } else if (piece_type == BISHOP) {
+            // Bishops like diagonals and center
+            let center = if (col >= 2 && col <= 5 && r >= 2 && r <= 5) { 20u64 } else { 0u64 };
+            return center
+        } else if (piece_type == ROOK) {
+            // Rooks on 7th rank and open files
+            let seventh = if (r == 6) { 30u64 } else { 0u64 };
+            return seventh
+        } else if (piece_type == QUEEN) {
+            // Queen shouldn't be too exposed early
+            let early_out = if (r >= 2 && r <= 5) { 5u64 } else { 0u64 };
+            return early_out
+        } else if (piece_type == KING) {
+            // King safety: castled position
+            let castled = if ((col <= 2 || col >= 6) && r == 0) { 30u64 } else { 0u64 };
+            return castled
+        };
+        0
+    }
+
+    fun evaluate_king_safety_advanced(board: &vector<u8>, king_pos: u8, is_white: bool): u64 {
+        let safety: u64 = 0;
+        let row = king_pos / 8;
+        let col = king_pos % 8;
+
+        // Bonus for castled position
+        if ((col <= 2 || col >= 6) && ((is_white && row == 0) || (!is_white && row == 7))) {
+            safety = safety + 40;
+        };
+
+        // Pawn shield
+        let pawn_color = if (is_white) { WHITE } else { BLACK };
+        let pawn_row = if (is_white) { row + 1 } else { if (row > 0) { row - 1 } else { 0 } };
+
+        if (pawn_row < 8) {
+            let start_col = if (col > 0) { col - 1 } else { 0 };
+            let end_col = if (col < 7) { col + 1 } else { 7 };
+            let c = start_col;
+            while (c <= end_col) {
+                let pos = pawn_row * 8 + c;
+                let piece = *vector::borrow(board, (pos as u64));
+                if ((piece & 7) == PAWN && (piece & 8) == pawn_color) {
+                    safety = safety + 15;
+                };
+                c = c + 1;
+            };
+        };
+
+        safety
     }
 
     // Check if piece can reach target (simplified, without full legality check)
@@ -1144,11 +1881,11 @@ module chess::chess {
         } else if (piece_type == KNIGHT) {
             return (row_diff == 2 && col_diff == 1) || (row_diff == 1 && col_diff == 2)
         } else if (piece_type == BISHOP) {
-            return row_diff == col_diff && row_diff > 0 && is_diagonal_clear(board, from, to)
+            return row_diff == col_diff && row_diff > 0 && check_diagonal_path(board, from, to)
         } else if (piece_type == ROOK) {
             return (row_diff == 0 || col_diff == 0) && (row_diff + col_diff > 0) && is_line_clear(board, from, to)
         } else if (piece_type == QUEEN) {
-            if (row_diff == col_diff && row_diff > 0) return is_diagonal_clear(board, from, to);
+            if (row_diff == col_diff && row_diff > 0) return check_diagonal_path(board, from, to);
             if ((row_diff == 0 || col_diff == 0) && (row_diff + col_diff > 0)) return is_line_clear(board, from, to);
             return false
         } else if (piece_type == KING) {
@@ -1328,12 +2065,17 @@ module chess::chess {
                 stats.best_streak = stats.current_streak;
             };
 
-            // Calculate points
-            let base_points: u64 = 100;
-            let time_bonus = if (move_count < 150) { (150 - move_count) * 2 } else { 0 };
-            let streak_bonus = stats.current_streak * 10;
+            // Hybrid Elo-style: +25 base, +fast win bonus, +streak bonus
+            let base_points: u64 = 25;
+            // Fast win bonus: up to +15 for wins under 30 moves
+            let fast_bonus = if (move_count < 30) { 15 }
+                else if (move_count < 50) { 10 }
+                else if (move_count < 80) { 5 }
+                else { 0 };
+            // Streak bonus: +2 per consecutive win (max +10)
+            let streak_bonus = if (stats.current_streak > 5) { 10 } else { stats.current_streak * 2 };
 
-            stats.total_points = stats.total_points + base_points + time_bonus + streak_bonus;
+            stats.total_points = stats.total_points + base_points + fast_bonus + streak_bonus;
 
             // Track fastest win
             if (stats.fastest_win_moves == 0 || move_count < stats.fastest_win_moves) {
@@ -1342,10 +2084,16 @@ module chess::chess {
         } else if (status == STATUS_BLACK_WIN) {
             stats.losses = stats.losses + 1;
             stats.current_streak = 0;
+            // Hybrid Elo-style: -5 for loss (can't go below 0)
+            if (stats.total_points >= 5) {
+                stats.total_points = stats.total_points - 5;
+            } else {
+                stats.total_points = 0;
+            };
         } else {
-            // Draw or stalemate
+            // Draw or stalemate: +10 points
             stats.draws = stats.draws + 1;
-            stats.total_points = stats.total_points + 30;
+            stats.total_points = stats.total_points + 10;
         };
 
         // Update global leaderboard
@@ -1442,5 +2190,391 @@ module chess::chess {
 
     fun abs_diff(a: u8, b: u8): u8 {
         if (a > b) { a - b } else { b - a }
+    }
+
+    // ============ UNIT TESTS ============
+
+    #[test]
+    fun test_abs_diff() {
+        assert!(abs_diff(5, 3) == 2, 0);
+        assert!(abs_diff(3, 5) == 2, 1);
+        assert!(abs_diff(0, 7) == 7, 2);
+        assert!(abs_diff(7, 0) == 7, 3);
+        assert!(abs_diff(4, 4) == 0, 4);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_empty_board() {
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // a1 to h8 (0 to 63) - full diagonal, should be clear
+        assert!(check_diagonal_path(&board, 0, 63) == true, 0);
+
+        // h1 to a8 (7 to 56) - full diagonal other direction
+        assert!(check_diagonal_path(&board, 7, 56) == true, 1);
+
+        // Adjacent diagonal (e.g., 0 to 9)
+        assert!(check_diagonal_path(&board, 0, 9) == true, 2);
+
+        // c1 to f4 (2 to 29) - 3 steps diagonal
+        assert!(check_diagonal_path(&board, 2, 29) == true, 3);
+
+        // f4 to c1 (29 to 2) - reverse direction
+        assert!(check_diagonal_path(&board, 29, 2) == true, 4);
+
+        // g7 to b2 (54 to 9) - down-left diagonal
+        assert!(check_diagonal_path(&board, 54, 9) == true, 5);
+
+        // b2 to g7 (9 to 54) - up-right diagonal
+        assert!(check_diagonal_path(&board, 9, 54) == true, 6);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_blocked() {
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // Place a piece at d4 (27)
+        *vector::borrow_mut(&mut board, 27) = WHITE | PAWN;
+
+        // a1 to h8 should be blocked (passes through d4)
+        // a1=0, b2=9, c3=18, d4=27, e5=36, f6=45, g7=54, h8=63
+        assert!(check_diagonal_path(&board, 0, 63) == false, 0);
+
+        // c3 to e5 should be blocked (d4 is in the way)
+        assert!(check_diagonal_path(&board, 18, 36) == false, 1);
+
+        // a1 to c3 should be clear (doesn't reach d4)
+        assert!(check_diagonal_path(&board, 0, 18) == true, 2);
+
+        // e5 to h8 should be clear (starts after d4)
+        assert!(check_diagonal_path(&board, 36, 63) == true, 3);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_edge_cases() {
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // Same square
+        assert!(check_diagonal_path(&board, 28, 28) == true, 0);
+
+        // Adjacent squares (1 step)
+        assert!(check_diagonal_path(&board, 27, 36) == true, 1); // d4 to e5
+        assert!(check_diagonal_path(&board, 36, 27) == true, 2); // e5 to d4
+        assert!(check_diagonal_path(&board, 27, 18) == true, 3); // d4 to c3
+        assert!(check_diagonal_path(&board, 27, 20) == true, 4); // d4 to e3
+
+        // Corner to corner diagonals
+        assert!(check_diagonal_path(&board, 0, 63) == true, 5);  // a1 to h8
+        assert!(check_diagonal_path(&board, 63, 0) == true, 6);  // h8 to a1
+        assert!(check_diagonal_path(&board, 7, 56) == true, 7);  // h1 to a8
+        assert!(check_diagonal_path(&board, 56, 7) == true, 8);  // a8 to h1
+    }
+
+    #[test]
+    fun test_is_line_clear_empty() {
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // Horizontal: a1 to h1 (0 to 7)
+        assert!(is_line_clear(&board, 0, 7) == true, 0);
+        assert!(is_line_clear(&board, 7, 0) == true, 1);
+
+        // Vertical: a1 to a8 (0 to 56)
+        assert!(is_line_clear(&board, 0, 56) == true, 2);
+        assert!(is_line_clear(&board, 56, 0) == true, 3);
+    }
+
+    #[test]
+    fun test_init_board() {
+        let board = init_board();
+        assert!(vector::length(&board) == 64, 0);
+
+        // Check white pieces on rank 1
+        assert!(*vector::borrow(&board, 0) == (WHITE | ROOK), 1);
+        assert!(*vector::borrow(&board, 4) == (WHITE | KING), 2);
+
+        // Check black pieces on rank 8
+        assert!(*vector::borrow(&board, 56) == (BLACK | ROOK), 3);
+        assert!(*vector::borrow(&board, 60) == (BLACK | KING), 4);
+
+        // Check pawns
+        assert!(*vector::borrow(&board, 8) == (WHITE | PAWN), 5);
+        assert!(*vector::borrow(&board, 48) == (BLACK | PAWN), 6);
+
+        // Check empty squares
+        assert!(*vector::borrow(&board, 28) == EMPTY, 7);
+    }
+
+    #[test]
+    fun test_generate_piece_moves_knight() {
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // Place white knight on d4 (27)
+        *vector::borrow_mut(&mut board, 27) = WHITE | KNIGHT;
+
+        let captures = vector::empty<Move>();
+        let capture_scores = vector::empty<u64>();
+        let non_captures = vector::empty<Move>();
+
+        generate_piece_moves(&board, 27, KNIGHT, true, WHITE, &mut captures, &mut capture_scores, &mut non_captures);
+
+        // Knight on d4 should have 8 moves: c2, e2, b3, f3, b5, f5, c6, e6
+        // Squares: 10, 12, 17, 21, 33, 37, 42, 44
+        assert!(vector::length(&non_captures) == 8, 0);
+    }
+
+    #[test]
+    fun test_generate_piece_moves_bishop() {
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // Place white bishop on d4 (27)
+        *vector::borrow_mut(&mut board, 27) = WHITE | BISHOP;
+
+        let captures = vector::empty<Move>();
+        let capture_scores = vector::empty<u64>();
+        let non_captures = vector::empty<Move>();
+
+        generate_piece_moves(&board, 27, BISHOP, true, WHITE, &mut captures, &mut capture_scores, &mut non_captures);
+
+        // Bishop on d4 should have 13 moves (diagonals in all directions)
+        assert!(vector::length(&non_captures) == 13, 0);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_row_0_edge() {
+        // Test diagonals starting from row 0
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // From a1 (0) going up-right to h8 (63)
+        assert!(check_diagonal_path(&board, 0, 63) == true, 0);
+
+        // From h1 (7) going up-left to a8 (56)
+        assert!(check_diagonal_path(&board, 7, 56) == true, 1);
+
+        // From c1 (2) going up-right
+        assert!(check_diagonal_path(&board, 2, 47) == true, 2);
+
+        // From c1 (2) going up-left to a3 (16)
+        assert!(check_diagonal_path(&board, 2, 16) == true, 3);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_col_0_edge() {
+        // Test diagonals starting from col 0
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // From a4 (24) going up-right to d7 (51)
+        assert!(check_diagonal_path(&board, 24, 51) == true, 0);
+
+        // From a4 (24) going down-right to c2 (10)
+        assert!(check_diagonal_path(&board, 24, 10) == true, 1);
+
+        // From a8 (56) going down-right to h1 (7)
+        assert!(check_diagonal_path(&board, 56, 7) == true, 2);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_all_directions_from_center() {
+        // Test all 4 diagonal directions from d4 (27)
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // d4 = 27 (row 3, col 3)
+        // Up-right: d4 to g7 (27 to 54)
+        assert!(check_diagonal_path(&board, 27, 54) == true, 0);
+
+        // Up-left: d4 to a7 (27 to 48)
+        assert!(check_diagonal_path(&board, 27, 48) == true, 1);
+
+        // Down-right: d4 to g1 (27 to 6)
+        assert!(check_diagonal_path(&board, 27, 6) == true, 2);
+
+        // Down-left: d4 to a1 (27 to 0)
+        assert!(check_diagonal_path(&board, 27, 0) == true, 3);
+    }
+
+    #[test]
+    fun test_ai_move_generation_from_start() {
+        // Simulate what happens after e2-e4
+        let board = init_board();
+
+        // Make e2-e4 move (square 12 to 28)
+        *vector::borrow_mut(&mut board, 12) = EMPTY;
+        *vector::borrow_mut(&mut board, 28) = WHITE | PAWN | HAS_MOVED;
+
+        // Now generate all black moves (what AI does)
+        let moves = generate_sorted_moves(&board, 60, 4, false);
+
+        // Should have legal moves for black
+        assert!(vector::length(&moves) > 0, 0);
+
+        // Validate each move doesn't crash
+        let i: u64 = 0;
+        let num_moves = vector::length(&moves);
+        while (i < num_moves) {
+            let m = vector::borrow(&moves, i);
+            let piece = *vector::borrow(&board, (m.from_square as u64));
+            let piece_type = piece & 7;
+
+            // For bishops and queens, test check_diagonal_path doesn't crash
+            if (piece_type == BISHOP || piece_type == QUEEN) {
+                let from_row = m.from_square / 8;
+                let from_col = m.from_square % 8;
+                let to_row = m.to_square / 8;
+                let to_col = m.to_square % 8;
+                let row_diff = abs_diff(from_row, to_row);
+                let col_diff = abs_diff(from_col, to_col);
+
+                if (row_diff == col_diff && row_diff > 0) {
+                    // This is a diagonal move - test it
+                    let _clear = check_diagonal_path(&board, m.from_square, m.to_square);
+                };
+            };
+            i = i + 1;
+        };
+    }
+
+    #[test]
+    fun test_is_valid_move_black_bishop() {
+        // Test validating moves for black bishops in starting position
+        let board = init_board();
+
+        // Make e2-e4
+        *vector::borrow_mut(&mut board, 12) = EMPTY;
+        *vector::borrow_mut(&mut board, 28) = WHITE | PAWN | HAS_MOVED;
+
+        // Create a mock game state for validation
+        // Black bishop on c8 (58) - can't move (blocked by pawns)
+        // Black bishop on f8 (61) - can't move (blocked by pawns)
+
+        // Test that is_valid_bishop_move works without crashing
+        // c8 to a6 would be a diagonal if not blocked
+        let result = is_valid_bishop_move(&board, 58, 40);
+        assert!(result == false, 0); // Should be blocked
+
+        // f8 to h6 would be a diagonal if not blocked
+        let result2 = is_valid_bishop_move(&board, 61, 47);
+        assert!(result2 == false, 1); // Should be blocked
+    }
+
+    #[test]
+    fun test_slide_in_direction_all_dirs() {
+        // Test slide_in_direction in all 8 directions from center
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        let captures = vector::empty<Move>();
+        let capture_scores = vector::empty<u64>();
+        let non_captures = vector::empty<Move>();
+
+        // From d4 (27), row=3, col=3
+        // Test all diagonal directions (used by bishops/queens)
+        slide_in_direction(&board, 27, 3, 3, 1, 1, WHITE, 330, &mut captures, &mut capture_scores, &mut non_captures); // +row +col
+        slide_in_direction(&board, 27, 3, 3, 1, 2, WHITE, 330, &mut captures, &mut capture_scores, &mut non_captures); // +row -col
+        slide_in_direction(&board, 27, 3, 3, 2, 1, WHITE, 330, &mut captures, &mut capture_scores, &mut non_captures); // -row +col
+        slide_in_direction(&board, 27, 3, 3, 2, 2, WHITE, 330, &mut captures, &mut capture_scores, &mut non_captures); // -row -col
+
+        // All moves should be generated without crashing
+        assert!(vector::length(&non_captures) > 0, 0);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_non_diagonal_input() {
+        // Test what happens if check_diagonal_path gets non-diagonal input
+        // (This shouldn't happen in practice but tests the safety check)
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // Horizontal move (not a diagonal) - a1 to h1
+        let result = check_diagonal_path(&board, 0, 7);
+        assert!(result == true, 0); // Should return true (let other validation handle it)
+
+        // Vertical move (not a diagonal) - a1 to a8
+        let result2 = check_diagonal_path(&board, 0, 56);
+        assert!(result2 == true, 1);
+
+        // Knight-like move (not a diagonal) - b1 to c3
+        let result3 = check_diagonal_path(&board, 1, 18);
+        assert!(result3 == true, 2);
+    }
+
+    #[test]
+    fun test_check_diagonal_path_extreme_corners() {
+        // Test all corner-to-corner diagonals
+        let board = vector::empty<u8>();
+        let i = 0;
+        while (i < 64) {
+            vector::push_back(&mut board, EMPTY);
+            i = i + 1;
+        };
+
+        // a1 (0) to h8 (63) and reverse
+        assert!(check_diagonal_path(&board, 0, 63) == true, 0);
+        assert!(check_diagonal_path(&board, 63, 0) == true, 1);
+
+        // h1 (7) to a8 (56) and reverse
+        assert!(check_diagonal_path(&board, 7, 56) == true, 2);
+        assert!(check_diagonal_path(&board, 56, 7) == true, 3);
+
+        // Test from each corner to 2 squares in
+        // a1 to c3
+        assert!(check_diagonal_path(&board, 0, 18) == true, 4);
+        // h1 to f3
+        assert!(check_diagonal_path(&board, 7, 21) == true, 5);
+        // a8 to c6
+        assert!(check_diagonal_path(&board, 56, 42) == true, 6);
+        // h8 to f6
+        assert!(check_diagonal_path(&board, 63, 45) == true, 7);
     }
 }
