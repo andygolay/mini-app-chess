@@ -1,20 +1,22 @@
 'use client';
 
 import { useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { Button } from 'movement-design-system';
 import { useMovementSDK } from '@movement-labs/miniapp-sdk';
 import { ChessBoard } from '../components/ChessBoard';
 import { GameInfo } from '../components/GameInfo';
-import { Leaderboard } from '../components/Leaderboard';
 import { useChessGame } from '../hooks/useChessGame';
-import { decodePiece, isPromotionMove } from '../utils/chess';
+import { isPromotionMove } from '../utils/chess';
 import { WHITE } from '../types/chess';
 
 export default function ChessPage() {
+  const router = useRouter();
   const { sdk, isConnected, address } = useMovementSDK();
   const {
     gameState,
     isLoading,
+    isInitializing,
     error,
     hasGame,
     startNewGame,
@@ -25,7 +27,6 @@ export default function ChessPage() {
 
   const [selectedSquare, setSelectedSquare] = useState<number | null>(null);
   const [highlightedMoves, setHighlightedMoves] = useState<number[]>([]);
-  const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [promotionPending, setPromotionPending] = useState<{
     from: number;
     to: number;
@@ -194,6 +195,13 @@ export default function ChessPage() {
                   <p className="text-gray-400 mb-4">Connect your wallet to play</p>
                 </div>
               </div>
+            ) : isInitializing ? (
+              <div className="aspect-square bg-gray-800/50 rounded-xl flex items-center justify-center border border-gray-700/50">
+                <div className="text-center">
+                  <div className="w-8 h-8 border-2 border-gray-400 border-t-white rounded-full animate-spin mx-auto mb-4" />
+                  <p className="text-gray-400">Loading game...</p>
+                </div>
+              </div>
             ) : !hasGame ? (
               <div className="aspect-square bg-gray-800/50 rounded-xl flex items-center justify-center border border-gray-700/50">
                 <div className="text-center">
@@ -227,7 +235,7 @@ export default function ChessPage() {
             ) : null}
 
             {/* Game controls */}
-            {isConnected && (
+            {isConnected && !isInitializing && (
               <div className="mt-4 flex flex-wrap gap-3 justify-center">
                 <Button
                   onClick={startNewGame}
@@ -249,10 +257,10 @@ export default function ChessPage() {
                 )}
 
                 <Button
-                  onClick={() => setShowLeaderboard(!showLeaderboard)}
+                  onClick={() => router.push('/leaderboard')}
                   variant="outline"
                 >
-                  {showLeaderboard ? 'Hide Leaderboard' : 'Leaderboard'}
+                  Leaderboard
                 </Button>
 
                 <Button
@@ -275,7 +283,7 @@ export default function ChessPage() {
 
           {/* Side panel */}
           <div className="space-y-4">
-            {gameState && (
+            {!isInitializing && gameState && (
               <GameInfo
                 status={gameState.status}
                 isWhiteTurn={gameState.isWhiteTurn}
@@ -285,10 +293,8 @@ export default function ChessPage() {
               />
             )}
 
-            {showLeaderboard && <Leaderboard sdk={sdk} address={address} />}
-
             {/* How to play */}
-            {!showLeaderboard && (
+            {!isInitializing && (
               <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
                 <h3 className="text-lg font-semibold text-white mb-3">How to Play</h3>
                 <ul className="text-gray-400 text-sm space-y-2">

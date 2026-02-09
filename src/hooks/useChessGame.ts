@@ -8,6 +8,7 @@ import type { GameState, ChessMove, GameStatus } from '../types/chess';
 interface UseChessGameResult {
   gameState: GameState | null;
   isLoading: boolean;
+  isInitializing: boolean;
   error: string;
   hasGame: boolean;
   startNewGame: () => Promise<void>;
@@ -23,6 +24,7 @@ export function useChessGame(
 ): UseChessGameResult {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
   const [error, setError] = useState('');
   const [hasGame, setHasGame] = useState(false);
 
@@ -246,6 +248,8 @@ export function useChessGame(
         const errorMessage = e instanceof Error ? e.message : 'Invalid move';
         setError(errorMessage);
         await sdk.haptic?.({ type: 'notification', style: 'error' });
+        // Refresh to ensure board is in sync with chain
+        await refreshGame();
       } finally {
         setIsLoading(false);
       }
@@ -313,13 +317,19 @@ export function useChessGame(
   // Initial load
   useEffect(() => {
     if (sdk && address) {
-      refreshGame();
+      setIsInitializing(true);
+      refreshGame().finally(() => {
+        setIsInitializing(false);
+      });
+    } else if (!sdk || !address) {
+      setIsInitializing(false);
     }
   }, [sdk, address, refreshGame]);
 
   return {
     gameState,
     isLoading,
+    isInitializing,
     error,
     hasGame,
     startNewGame,

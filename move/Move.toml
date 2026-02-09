@@ -3,7 +3,7 @@ name = "chess"
 version = "0.0.1"
 
 [addresses]
-chess = "_"
+chess = "0xf73f7b661b8c009824a8ed087ad5166c83af0729329418b8ec8c764c8aaf0229"
 
 [dependencies]
 AptosFramework = { git = "https://github.com/movementlabsxyz/aptos-core.git", subdir = "aptos-move/framework/aptos-framework", rev = "movement" }

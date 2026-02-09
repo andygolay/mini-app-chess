@@ -79,6 +79,15 @@ module chess::chess {
         player_points: vector<u64>,
     }
 
+    // ============ INIT ============
+
+    fun init_module(account: &signer) {
+        move_to(account, Leaderboard {
+            top_players: vector::empty<address>(),
+            player_points: vector::empty<u64>(),
+        });
+    }
+
     // ============ ENTRY FUNCTIONS ============
 
     public entry fun new_game(account: &signer) acquires Game {
@@ -876,6 +885,10 @@ module chess::chess {
     }
 
     // ============ AI LOGIC ============
+    // 2-ply minimax with alpha-beta style pruning
+    // Evaluates AI move, then considers best human response
+
+    const SCORE_OFFSET: u64 = 100000; // Offset to handle "negative" scores with u64
 
     fun generate_ai_move(game: &Game): Move {
         let best_from: u8 = 0;
@@ -884,6 +897,7 @@ module chess::chess {
         let best_score: u64 = 0;
         let found_move = false;
 
+        // Generate all legal moves for black
         let from: u8 = 0;
         while (from < 64) {
             let piece = *vector::borrow(&game.board, (from as u64));
@@ -895,7 +909,6 @@ module chess::chess {
                     let piece_type = piece & 7;
                     let to_row = to / 8;
 
-                    // Check normal moves and promotions
                     let promos = if (piece_type == PAWN && to_row == 0) {
                         vector[QUEEN, ROOK, BISHOP, KNIGHT]
                     } else {
@@ -907,11 +920,12 @@ module chess::chess {
                         let promo = *vector::borrow(&promos, p);
 
                         if (is_valid_move(game, from, to, promo, false)) {
-                            let score = evaluate_move(game, from, to, promo);
+                            // Evaluate this move using minimax
+                            let score = evaluate_ai_move_with_response(game, from, to, promo);
 
-                            // Add some deterministic variation based on game state
-                            let variation = ((from as u64) * 7 + (to as u64) * 13 + game.move_count) % 50;
-                            let adjusted_score = score + variation;
+                            // Small deterministic tiebreaker (much smaller than before)
+                            let tiebreaker = ((from as u64) + (to as u64) * 3 + game.move_count) % 10;
+                            let adjusted_score = score + tiebreaker;
 
                             if (!found_move || adjusted_score > best_score) {
                                 best_score = adjusted_score;
@@ -941,49 +955,349 @@ module chess::chess {
         }
     }
 
-    fun evaluate_move(game: &Game, from: u8, to: u8, _promo: u8): u64 {
-        let score: u64 = 100; // Base score
+    // Evaluate AI move considering best human response (2-ply minimax)
+    fun evaluate_ai_move_with_response(game: &Game, from: u8, to: u8, promo: u8): u64 {
+        // Make the AI move on a temp board
+        let temp_board = game.board;
+        let piece = *vector::borrow(&temp_board, (from as u64));
+        let piece_type = piece & 7;
+        let captured = *vector::borrow(&temp_board, (to as u64)) & 7;
 
-        let target = *vector::borrow(&game.board, (to as u64));
-        let target_type = target & 7;
+        // Execute move
+        let new_piece = if (promo != 0) { BLACK | promo | HAS_MOVED } else { piece | HAS_MOVED };
+        *vector::borrow_mut(&mut temp_board, (from as u64)) = EMPTY;
+        *vector::borrow_mut(&mut temp_board, (to as u64)) = new_piece;
 
-        // Capture bonus
-        if (target_type != EMPTY) {
-            score = score + get_piece_value(target_type);
+        // Handle castling
+        let is_castling = piece_type == KING && abs_diff(from % 8, to % 8) == 2;
+        if (is_castling) {
+            let row = from / 8;
+            if (to > from) {
+                let rook = *vector::borrow(&temp_board, ((row * 8 + 7) as u64));
+                *vector::borrow_mut(&mut temp_board, ((row * 8 + 7) as u64)) = EMPTY;
+                *vector::borrow_mut(&mut temp_board, ((row * 8 + 5) as u64)) = rook | HAS_MOVED;
+            } else {
+                let rook = *vector::borrow(&temp_board, ((row * 8) as u64));
+                *vector::borrow_mut(&mut temp_board, ((row * 8) as u64)) = EMPTY;
+                *vector::borrow_mut(&mut temp_board, ((row * 8 + 3) as u64)) = rook | HAS_MOVED;
+            };
         };
 
-        // Center control bonus
+        // Handle en passant
+        let is_en_passant = piece_type == PAWN && (to % 8) != (from % 8) && captured == EMPTY;
+        if (is_en_passant) {
+            *vector::borrow_mut(&mut temp_board, ((to + 8) as u64)) = EMPTY;
+        };
+
+        // Update king position
+        let new_black_king = if (piece_type == KING) { to } else { game.black_king_pos };
+
+        // Immediate position evaluation after AI move
+        let position_score = evaluate_position(&temp_board, new_black_king, game.white_king_pos);
+
+        // BIG bonus for captures (MVV-LVA: Most Valuable Victim - Least Valuable Attacker)
+        let capture_bonus: u64 = 0;
+        if (captured != EMPTY) {
+            // High bonus for captures, extra if attacking with lower value piece
+            capture_bonus = get_piece_value(captured) * 10;
+            let attacker_value = get_piece_value(piece_type);
+            if (attacker_value < get_piece_value(captured)) {
+                capture_bonus = capture_bonus + 500; // Good trade
+            };
+        };
+
+        // Check bonus
+        let gives_check = is_square_attacked(&temp_board, game.white_king_pos, false);
+        let check_bonus: u64 = if (gives_check) { 300 } else { 0 };
+
+        // CRITICAL: Check if the moved piece is safe (not hanging)
+        let piece_safe_bonus: u64 = 0;
+        let piece_is_attacked = is_square_attacked(&temp_board, to, true);
+        let piece_is_defended = is_square_attacked(&temp_board, to, false);
+
+        if (piece_is_attacked) {
+            if (!piece_is_defended) {
+                // Piece is hanging! Big penalty
+                let hanging_penalty = get_piece_value(if (promo != 0) { promo } else { piece_type }) * 8;
+                if (position_score > hanging_penalty) {
+                    return position_score - hanging_penalty + capture_bonus + check_bonus
+                } else {
+                    return capture_bonus + check_bonus // Avoid underflow
+                }
+            } else {
+                // Piece is attacked but defended - check if trade is good
+                let my_value = get_piece_value(if (promo != 0) { promo } else { piece_type });
+                let attacker_value = get_lowest_attacker_value(&temp_board, to, true);
+                if (attacker_value < my_value) {
+                    // Bad trade possible - penalty
+                    let trade_penalty = (my_value - attacker_value) * 5;
+                    if (position_score > trade_penalty) {
+                        return position_score - trade_penalty + capture_bonus + check_bonus
+                    };
+                };
+            };
+        } else {
+            piece_safe_bonus = 100; // Bonus for safe square
+        };
+
+        // Consider best human response (1-ply lookahead for opponent)
+        let human_threat = evaluate_best_human_response(&temp_board, game.white_king_pos, new_black_king);
+
+        // Final score: position + bonuses - opponent's best response threat
+        let base = position_score + capture_bonus + check_bonus + piece_safe_bonus;
+        if (base > human_threat) {
+            base - human_threat
+        } else {
+            1 // Avoid zero/underflow, this is a bad move
+        }
+    }
+
+    // Find the best response white can make and return its threat value
+    fun evaluate_best_human_response(board: &vector<u8>, _white_king: u8, black_king: u8): u64 {
+        let max_threat: u64 = 0;
+
+        let from: u8 = 0;
+        while (from < 64) {
+            let piece = *vector::borrow(board, (from as u64));
+            let piece_type = piece & 7;
+            let piece_color = piece & 8;
+
+            if (piece_type != EMPTY && piece_color == WHITE) {
+                let to: u8 = 0;
+                while (to < 64) {
+                    // Quick validation (no full game state, simplified)
+                    if (can_piece_reach(board, from, to, piece_type, true)) {
+                        let target = *vector::borrow(board, (to as u64));
+                        let target_type = target & 7;
+                        let target_color = target & 8;
+
+                        // Skip if capturing own piece
+                        if (target_type != EMPTY && target_color == WHITE) {
+                            to = to + 1;
+                            continue
+                        };
+
+                        // Evaluate threat of this response
+                        let threat: u64 = 0;
+
+                        // Capture threat
+                        if (target_type != EMPTY && target_color == BLACK) {
+                            threat = threat + get_piece_value(target_type) * 8;
+
+                            // Check if our piece is defended
+                            if (!is_square_attacked(board, to, false)) {
+                                threat = threat + get_piece_value(target_type) * 4; // Extra for undefended
+                            };
+                        };
+
+                        // Check threat
+                        if (target_type == EMPTY || target_color == BLACK) {
+                            // Simulate human move
+                            let temp = *board;
+                            *vector::borrow_mut(&mut temp, (from as u64)) = EMPTY;
+                            *vector::borrow_mut(&mut temp, (to as u64)) = piece;
+
+                            if (is_square_attacked(&temp, black_king, true)) {
+                                threat = threat + 200; // Check is dangerous
+                            };
+                        };
+
+                        if (threat > max_threat) {
+                            max_threat = threat;
+                        };
+                    };
+                    to = to + 1;
+                };
+            };
+            from = from + 1;
+        };
+
+        max_threat
+    }
+
+    // Check if piece can reach target (simplified, without full legality check)
+    fun can_piece_reach(board: &vector<u8>, from: u8, to: u8, piece_type: u8, is_white: bool): bool {
+        if (from == to) return false;
+
+        let from_row = from / 8;
+        let from_col = from % 8;
         let to_row = to / 8;
         let to_col = to % 8;
-        if ((to_row == 3 || to_row == 4) && (to_col == 3 || to_col == 4)) {
-            score = score + 30;
-        };
+        let row_diff = abs_diff(from_row, to_row);
+        let col_diff = abs_diff(from_col, to_col);
 
-        // Development bonus (moving from back rank)
-        let from_row = from / 8;
-        if (from_row == 7) {
-            score = score + 20;
-        };
-
-        // Check if move gives check (bonus)
-        let piece = *vector::borrow(&game.board, (from as u64));
-        let piece_type = piece & 7;
-
-        // Simulate move
-        let temp_board = game.board;
-        *vector::borrow_mut(&mut temp_board, (from as u64)) = EMPTY;
-        *vector::borrow_mut(&mut temp_board, (to as u64)) = piece;
-
-        if (is_square_attacked(&temp_board, game.white_king_pos, false)) {
-            score = score + 50; // Bonus for giving check
-        };
-
-        // Pawn advancement bonus
         if (piece_type == PAWN) {
-            score = score + ((7 - to_row) as u64) * 5;
+            if (is_white) {
+                if (col_diff == 1 && to_row == from_row + 1) return true; // Capture
+                if (col_diff == 0 && to_row == from_row + 1) {
+                    let target = *vector::borrow(board, (to as u64));
+                    return (target & 7) == EMPTY
+                };
+            } else {
+                if (col_diff == 1 && from_row > 0 && to_row == from_row - 1) return true;
+                if (col_diff == 0 && from_row > 0 && to_row == from_row - 1) {
+                    let target = *vector::borrow(board, (to as u64));
+                    return (target & 7) == EMPTY
+                };
+            };
+            return false
+        } else if (piece_type == KNIGHT) {
+            return (row_diff == 2 && col_diff == 1) || (row_diff == 1 && col_diff == 2)
+        } else if (piece_type == BISHOP) {
+            return row_diff == col_diff && row_diff > 0 && is_diagonal_clear(board, from, to)
+        } else if (piece_type == ROOK) {
+            return (row_diff == 0 || col_diff == 0) && (row_diff + col_diff > 0) && is_line_clear(board, from, to)
+        } else if (piece_type == QUEEN) {
+            if (row_diff == col_diff && row_diff > 0) return is_diagonal_clear(board, from, to);
+            if ((row_diff == 0 || col_diff == 0) && (row_diff + col_diff > 0)) return is_line_clear(board, from, to);
+            return false
+        } else if (piece_type == KING) {
+            return row_diff <= 1 && col_diff <= 1
+        };
+
+        false
+    }
+
+    // Get the value of the lowest value attacker on a square
+    fun get_lowest_attacker_value(board: &vector<u8>, square: u8, by_white: bool): u64 {
+        let attacker_color = if (by_white) { WHITE } else { BLACK };
+        let lowest: u64 = 10000; // Higher than any piece
+
+        let i: u8 = 0;
+        while (i < 64) {
+            let piece = *vector::borrow(board, (i as u64));
+            let piece_type = piece & 7;
+            let piece_color = piece & 8;
+
+            if (piece_type != EMPTY && piece_color == attacker_color) {
+                if (can_attack(board, i, square, piece_type, by_white)) {
+                    let value = get_piece_value(piece_type);
+                    if (value < lowest) {
+                        lowest = value;
+                    };
+                };
+            };
+            i = i + 1;
+        };
+
+        lowest
+    }
+
+    // Full position evaluation
+    fun evaluate_position(board: &vector<u8>, black_king: u8, white_king: u8): u64 {
+        let score: u64 = SCORE_OFFSET; // Start at offset so we can "subtract"
+
+        let i: u64 = 0;
+        while (i < 64) {
+            let piece = *vector::borrow(board, i);
+            let piece_type = piece & 7;
+            let piece_color = piece & 8;
+
+            if (piece_type != EMPTY) {
+                let value = get_piece_value(piece_type);
+                let row = (i / 8) as u8;
+                let col = (i % 8) as u8;
+
+                if (piece_color == BLACK) {
+                    // Add value for black pieces
+                    score = score + value;
+
+                    // Positional bonuses for black
+                    score = score + get_piece_square_bonus(piece_type, row, col, false);
+                } else {
+                    // Subtract value for white pieces
+                    if (score > value) {
+                        score = score - value;
+                    };
+
+                    // Subtract positional bonuses for white
+                    let white_bonus = get_piece_square_bonus(piece_type, row, col, true);
+                    if (score > white_bonus) {
+                        score = score - white_bonus;
+                    };
+                };
+            };
+            i = i + 1;
+        };
+
+        // King safety
+        let black_king_safety = evaluate_king_safety(board, black_king, false);
+        let white_king_safety = evaluate_king_safety(board, white_king, true);
+        score = score + black_king_safety;
+        if (score > white_king_safety) {
+            score = score - white_king_safety;
         };
 
         score
+    }
+
+    // Piece-square tables (simplified)
+    fun get_piece_square_bonus(piece_type: u8, row: u8, col: u8, is_white: bool): u64 {
+        // Flip row for white pieces (they want to advance up the board)
+        let effective_row = if (is_white) { 7 - row } else { row };
+
+        if (piece_type == PAWN) {
+            // Pawns want to advance
+            let advance_bonus = (effective_row as u64) * 10;
+            // Center pawns are valuable
+            let center_bonus: u64 = if ((col == 3 || col == 4) && (effective_row >= 3 && effective_row <= 5)) { 20 } else { 0 };
+            return advance_bonus + center_bonus
+        } else if (piece_type == KNIGHT) {
+            // Knights want center, hate edges
+            let edge_penalty: u64 = if (col == 0 || col == 7 || row == 0 || row == 7) { 0 } else { 20 };
+            let center_bonus: u64 = if ((col >= 2 && col <= 5) && (row >= 2 && row <= 5)) { 20 } else { 0 };
+            return edge_penalty + center_bonus
+        } else if (piece_type == BISHOP) {
+            // Bishops like diagonals and center
+            let center_bonus: u64 = if ((col >= 2 && col <= 5) && (row >= 2 && row <= 5)) { 15 } else { 0 };
+            return center_bonus
+        } else if (piece_type == ROOK) {
+            // Rooks on open files and 7th rank
+            let seventh_rank: u64 = if (effective_row == 6) { 30 } else { 0 };
+            return seventh_rank
+        } else if (piece_type == QUEEN) {
+            // Queen shouldn't come out too early, prefer safety
+            let early_penalty: u64 = if (effective_row >= 5 && effective_row <= 7) { 0 } else { 10 };
+            return early_penalty
+        };
+
+        0
+    }
+
+    // King safety evaluation
+    fun evaluate_king_safety(board: &vector<u8>, king_pos: u8, is_white: bool): u64 {
+        let safety: u64 = 0;
+        let king_row = king_pos / 8;
+        let king_col = king_pos % 8;
+
+        // Bonus for castled position (king on g or c file)
+        if ((king_col == 6 || king_col == 2) && ((is_white && king_row == 0) || (!is_white && king_row == 7))) {
+            safety = safety + 50;
+        };
+
+        // Check pawn shield
+        let pawn_color = if (is_white) { WHITE | PAWN } else { BLACK | PAWN };
+        let shield_row = if (is_white) { king_row + 1 } else { if (king_row > 0) { king_row - 1 } else { 0 } };
+
+        if (shield_row < 8) {
+            // Check pawns in front of king
+            let check_cols = vector[king_col];
+            if (king_col > 0) { vector::push_back(&mut check_cols, king_col - 1); };
+            if (king_col < 7) { vector::push_back(&mut check_cols, king_col + 1); };
+
+            let j = 0;
+            while (j < vector::length(&check_cols)) {
+                let c = *vector::borrow(&check_cols, j);
+                let sq = shield_row * 8 + c;
+                let piece = *vector::borrow(board, (sq as u64));
+                if ((piece & 15) == pawn_color) {
+                    safety = safety + 15;
+                };
+                j = j + 1;
+            };
+        };
+
+        safety
     }
 
     fun get_piece_value(piece_type: u8): u64 {
@@ -992,6 +1306,7 @@ module chess::chess {
         else if (piece_type == BISHOP) { 330 }
         else if (piece_type == ROOK) { 500 }
         else if (piece_type == QUEEN) { 900 }
+        else if (piece_type == KING) { 20000 }
         else { 0 }
     }
 
