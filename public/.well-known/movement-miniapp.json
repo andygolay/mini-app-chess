@@ -1,0 +1,26 @@
+{
+  "name": "Mini App Starter",
+  "description": "A simple counter mini app starter",
+  "icon": "🚀",
+  "version": "0.1.0",
+  "author": {
+    "name": "Movement Labs",
+    "address": "0x1",
+    "website": "https://movementnetwork.xyz"
+  },
+  "category": "utility",
+  "tags": ["starter", "counter", "example"],
+  "url": "http://localhost:3000",
+  "permissions": [
+    "wallet.read",
+    "wallet.sign"
+  ],
+  "verified": false,
+  "theme": {
+    "primaryColor": "#00D4AA",
+    "accentColor": "#00D4AA"
+  },
+  "supportedNetworks": ["mainnet", "testnet"],
+  "minimumWalletBalance": "0"
+}
+
