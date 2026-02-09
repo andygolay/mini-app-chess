@@ -9,9 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@movement-labs/miniapp-sdk": "github:MoveIndustries/mini-app-sdk",
+    "@movement-labs/miniapp-sdk": "https://github.com/MoveIndustries/mini-app-sdk.git",
     "@tailwindcss/postcss": "^4.1.14",
-    "movement-design-system": "github:movementlabsxyz/movement-design-system#shadcn",
+    "movement-design-system": "https://github.com/movementlabsxyz/movement-design-system.git#shadcn",
     "next": "^15.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
